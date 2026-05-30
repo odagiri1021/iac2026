@@ -2,7 +2,7 @@ module GanimedePoincareManifolds
 
 using DifferentialEquations
 using LinearAlgebra
-using GLMakie
+# using GLMakie
 using Printf
 using Colors
 using FileIO
