@@ -7,6 +7,9 @@ using Printf
 using Colors
 using FileIO
 
+using CairoMakie
+CairoMakie.activate!()
+
 # ==============================================================================
 # 0. Settings (Jupiter–Ganymede planar CR3BP)
 # ==============================================================================
