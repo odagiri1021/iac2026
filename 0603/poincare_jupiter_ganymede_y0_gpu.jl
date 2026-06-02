@@ -7,19 +7,13 @@
 
 using LinearAlgebra
 using Printf
-using GLMakie
 using CairoMakie
 using DataFrames, CSV
 using CUDA
 
 CUDA.allowscalar(false)
 
-try
-    GLMakie.activate!()
-catch err
-    @warn "GLMakie failed. Use CairoMakie." err
-    CairoMakie.activate!()
-end
+CairoMakie.activate!(type = "png")
 
 # ------------------------ Config ------------------------
 
@@ -71,7 +65,7 @@ Base.@kwdef struct Config
     fig_size_xy::Tuple{Int,Int}   = (900, 750)
     fig_size_sec::Tuple{Int,Int}  = (1000, 750)
 
-    out_dir::String      = raw"C:\Users\tmyko\OneDrive - Kyushu University\lab_stochastic_optimal_control\poincaremap_ganymede_y0"
+    out_dir::String      = @__DIR__
 end
 
 # --------------------- Constants & Utils ---------------------
@@ -1040,9 +1034,7 @@ function run(conf::Config = Config())
         save(joinpath(conf.out_dir, "$(conf.file_stub)_section_x_vx.png"), f2; px_per_unit = 3)
     end
 
-    display(f0)
-    display(f1)
-    display(f2)
+    # Headless server: figures are saved to PNG, not displayed.
 
     # ---------------- CSV output ----------------
 
