@@ -367,6 +367,34 @@ function CreateInitial_y0_section_grid(conf::Config,
     return x_init, y_init, z_init, vx_init, vy_init, vz_init
 end
 
+# ------------------ Forbidden region on y=0 section ------------------
+
+function CalcForbiddenBoundary_xvx(conf::Config, mu::Float64, C::Float64; nx_plot::Int = 2000)
+    xs = collect(range(conf.x_min, conf.x_max; length = nx_plot))
+
+    vx_plus  = fill(NaN, nx_plot)
+    vx_minus = fill(NaN, nx_plot)
+
+    for i in eachindex(xs)
+        x = xs[i]
+        y = 0.0
+        z = 0.0
+
+        r1 = sqrt((x + mu)^2 + y^2 + z^2)
+        r2 = sqrt((x - 1 + mu)^2 + y^2 + z^2)
+
+        rhs = x^2 + 2 * (1 - mu) / r1 + 2 * mu / r2 - C
+
+        if rhs >= 0
+            v = sqrt(rhs)
+            vx_plus[i]  =  v
+            vx_minus[i] = -v
+        end
+    end
+
+    return xs, vx_plus, vx_minus
+end
+
 # ------------------ CPU batch ------------------
 
 function ParallelSection_CPU(RoundNum, RoundMaxDur,
@@ -857,6 +885,144 @@ function ParallelSection_GPU(RoundNum, RoundMaxDur,
     return t_sec, X_sec, ids, rounds
 end
 
+
+# ------------------ Save one-step map pairs ------------------
+
+@inline function Jacobi_const_vals(x, y, z, vx, vy, vz, mu)
+    r1 = sqrt((x + mu)^2 + y^2 + z^2)
+    r2 = sqrt((x - 1 + mu)^2 + y^2 + z^2)
+    U  = 0.5 * (x^2 + y^2) + (1 - mu) / r1 + mu / r2
+    v2 = vx^2 + vy^2 + vz^2
+    return 2U - v2
+end
+
+function write_map_pairs_csv(map_csv_path,
+                             x0v, y0v, z0v, vx0v, vy0v, vz0v,
+                             t_sec, X_sec, ids, rounds,
+                             mu)
+
+    N0 = length(x0v)
+
+    if isempty(rounds)
+        open(map_csv_path, "w") do io
+            println(io, "id,n_from,n_to,t_from,x_from,y_from,z_from,vx_from,vy_from,vz_from,C_from,t_to,x_to,y_to,z_to,vx_to,vy_to,vz_to,C_to,dt,dx,dy,dz,dvx,dvy,dvz")
+        end
+        return 0
+    end
+
+    maxround = maximum(rounds)
+
+    # hit_index[id, round] = row index in X_sec
+    hit_index = fill(0, N0, maxround)
+
+    @inbounds for i in eachindex(ids)
+        id = ids[i]
+        r  = rounds[i]
+        if 1 <= id <= N0 && 1 <= r <= maxround
+            hit_index[id, r] = i
+        end
+    end
+
+    pair_count = 0
+
+    open(map_csv_path, "w") do io
+        println(io, "id,n_from,n_to,t_from,x_from,y_from,z_from,vx_from,vy_from,vz_from,C_from,t_to,x_to,y_to,z_to,vx_to,vy_to,vz_to,C_to,dt,dx,dy,dz,dvx,dvy,dvz")
+
+        @inbounds for id in 1:N0
+            # ------------------------------------------------------------
+            # round 0 -> round 1
+            # initial section point s_0 maps to first return s_1
+            # ------------------------------------------------------------
+            idx_to = hit_index[id, 1]
+
+            if idx_to != 0
+                t_from  = 0.0
+                x_from  = x0v[id]
+                y_from  = y0v[id]
+                z_from  = z0v[id]
+                vx_from = vx0v[id]
+                vy_from = vy0v[id]
+                vz_from = vz0v[id]
+
+                t_to  = t_sec[idx_to]
+                x_to  = X_sec[idx_to, 1]
+                y_to  = X_sec[idx_to, 2]
+                z_to  = X_sec[idx_to, 3]
+                vx_to = X_sec[idx_to, 4]
+                vy_to = X_sec[idx_to, 5]
+                vz_to = X_sec[idx_to, 6]
+
+                C_from = Jacobi_const_vals(x_from, y_from, z_from, vx_from, vy_from, vz_from, mu)
+                C_to   = Jacobi_const_vals(x_to,   y_to,   z_to,   vx_to,   vy_to,   vz_to,   mu)
+
+                @printf(io,
+                    "%d,%d,%d,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e\n",
+                    id, 0, 1,
+                    t_from, x_from, y_from, z_from, vx_from, vy_from, vz_from, C_from,
+                    t_to,   x_to,   y_to,   z_to,   vx_to,   vy_to,   vz_to,   C_to,
+                    t_to - t_from,
+                    x_to - x_from,
+                    y_to - y_from,
+                    z_to - z_from,
+                    vx_to - vx_from,
+                    vy_to - vy_from,
+                    vz_to - vz_from
+                )
+
+                pair_count += 1
+            end
+
+            # ------------------------------------------------------------
+            # round r -> round r+1
+            # section point s_r maps to next return s_{r+1}
+            # ------------------------------------------------------------
+            for r in 1:(maxround - 1)
+                idx_from = hit_index[id, r]
+                idx_to   = hit_index[id, r + 1]
+
+                if idx_from != 0 && idx_to != 0
+                    t_from  = t_sec[idx_from]
+                    x_from  = X_sec[idx_from, 1]
+                    y_from  = X_sec[idx_from, 2]
+                    z_from  = X_sec[idx_from, 3]
+                    vx_from = X_sec[idx_from, 4]
+                    vy_from = X_sec[idx_from, 5]
+                    vz_from = X_sec[idx_from, 6]
+
+                    t_to  = t_sec[idx_to]
+                    x_to  = X_sec[idx_to, 1]
+                    y_to  = X_sec[idx_to, 2]
+                    z_to  = X_sec[idx_to, 3]
+                    vx_to = X_sec[idx_to, 4]
+                    vy_to = X_sec[idx_to, 5]
+                    vz_to = X_sec[idx_to, 6]
+
+                    C_from = Jacobi_const_vals(x_from, y_from, z_from, vx_from, vy_from, vz_from, mu)
+                    C_to   = Jacobi_const_vals(x_to,   y_to,   z_to,   vx_to,   vy_to,   vz_to,   mu)
+
+                    @printf(io,
+                        "%d,%d,%d,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%.16e\n",
+                        id, r, r + 1,
+                        t_from, x_from, y_from, z_from, vx_from, vy_from, vz_from, C_from,
+                        t_to,   x_to,   y_to,   z_to,   vx_to,   vy_to,   vz_to,   C_to,
+                        t_to - t_from,
+                        x_to - x_from,
+                        y_to - y_from,
+                        z_to - z_from,
+                        vx_to - vx_from,
+                        vy_to - vy_from,
+                        vz_to - vz_from
+                    )
+
+                    pair_count += 1
+                end
+            end
+        end
+    end
+
+    return pair_count
+end
+
 # ------------------------ Main ------------------------
 
 function run(conf::Config = Config())
@@ -1018,13 +1184,36 @@ function run(conf::Config = Config())
 
     # ---------------- x - xdot Poincare section ----------------
 
+    # ---------------- x - xdot Poincare section with forbidden region ----------------
+
     f2 = Figure(size = conf.fig_size_sec, backgroundcolor = :white)
     ax2 = Axis(f2[1, 1], xlabel = "x [-]", ylabel = "xdot [-]")
 
+    xs_forbid, vx_plus, vx_minus = CalcForbiddenBoundary_xvx(conf, mu, C)
+
+    valid = .!isnan.(vx_plus)
+    xs_valid = xs_forbid[valid]
+    vp = vx_plus[valid]
+    vm = vx_minus[valid]
+
+    if !isempty(xs_valid)
+        # 上側の禁止領域
+        band!(ax2, xs_valid, vp, fill(conf.vx_max, length(xs_valid));
+            color = (:lightgray, 0.8))
+
+        # 下側の禁止領域
+        band!(ax2, xs_valid, fill(conf.vx_min, length(xs_valid)), vm;
+            color = (:lightgray, 0.8))
+
+        # 0速度曲線の境界
+        lines!(ax2, xs_valid, vp; color = :black, linewidth = 2)
+        lines!(ax2, xs_valid, vm; color = :black, linewidth = 2)
+    end
+
     if nrow > 0
         scatter!(ax2, X_sec[:, 1], X_sec[:, 4];
-                 markersize = 1.2,
-                 color = RGBf(0.35, 0.35, 0.35))
+                markersize = 1.2,
+                color = RGBf(0.25, 0.25, 0.25))
     end
 
     xlims!(ax2, conf.x_min, conf.x_max)
@@ -1055,11 +1244,19 @@ function run(conf::Config = Config())
         csv_path = joinpath(conf.out_dir, "$(conf.file_stub)_section_points.csv")
         CSV.write(csv_path, df)
 
+        map_csv_path = joinpath(conf.out_dir, "$(conf.file_stub)_map_pairs.csv")
+        n_pairs = write_map_pairs_csv(map_csv_path,
+                                      x0, y0, z0, vx0, vy0, vz0,
+                                      t_sec, X_sec, ids, rounds,
+                                      mu)
+
         println("Saved:")
         println(csv_path)
+        println(map_csv_path)
         println(joinpath(conf.out_dir, "$(conf.file_stub)_initial_x_vx.png"))
         println(joinpath(conf.out_dir, "$(conf.file_stub)_xy.png"))
         println(joinpath(conf.out_dir, "$(conf.file_stub)_section_x_vx.png"))
+        println(@sprintf("Map pairs saved = %d", n_pairs))
     end
 
     println(@sprintf("Done. Jacobi C = %.15f", C))
